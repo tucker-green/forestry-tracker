@@ -1,0 +1,67 @@
+package com.forestrytracker;
+
+import java.util.EnumMap;
+import java.util.Map;
+import net.runelite.api.gameval.ItemID;
+import org.junit.Test;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+
+public class LeafDiffTest
+{
+	@Test
+	public void countIgnoresNonLeafItems()
+	{
+		Map<LeafType, Integer> counts = LeafDiff.count(
+			new int[]{ItemID.LEAVES_OAK, ItemID.FORESTRY_CURRENCY, ItemID.LEAVES_OAK, ItemID.LEAVES_MAGIC, -1},
+			new int[]{3, 500, 2, 1, 0});
+
+		assertEquals(5, (int) counts.get(LeafType.OAK));
+		assertEquals(1, (int) counts.get(LeafType.MAGIC));
+		assertEquals(2, counts.size());
+	}
+
+	@Test
+	public void deltaReportsOnlyChangedTypes()
+	{
+		Map<LeafType, Integer> prev = new EnumMap<>(LeafType.class);
+		prev.put(LeafType.OAK, 3);
+		prev.put(LeafType.YEW, 2);
+		Map<LeafType, Integer> next = new EnumMap<>(LeafType.class);
+		next.put(LeafType.OAK, 5);
+		next.put(LeafType.WILLOW, 1);
+
+		Map<LeafType, Integer> delta = LeafDiff.delta(prev, next);
+		assertEquals(2, (int) delta.get(LeafType.OAK));
+		assertEquals(1, (int) delta.get(LeafType.WILLOW));
+		assertEquals(-2, (int) delta.get(LeafType.YEW));
+		assertEquals(3, delta.size());
+	}
+
+	@Test
+	public void movingLeavesBetweenContainersNetsToZero()
+	{
+		Map<LeafType, Integer> kitBefore = new EnumMap<>(LeafType.class);
+		kitBefore.put(LeafType.MAPLE, 10);
+		Map<LeafType, Integer> kitAfter = new EnumMap<>(LeafType.class);
+		kitAfter.put(LeafType.MAPLE, 4);
+
+		Map<LeafType, Integer> invBefore = new EnumMap<>(LeafType.class);
+		Map<LeafType, Integer> invAfter = new EnumMap<>(LeafType.class);
+		invAfter.put(LeafType.MAPLE, 6);
+
+		Map<LeafType, Integer> pending = new EnumMap<>(LeafType.class);
+		LeafDiff.accumulate(pending, LeafDiff.delta(kitBefore, kitAfter));
+		LeafDiff.accumulate(pending, LeafDiff.delta(invBefore, invAfter));
+
+		assertEquals(0, (int) pending.get(LeafType.MAPLE));
+	}
+
+	@Test
+	public void emptyDeltaForIdenticalSnapshots()
+	{
+		Map<LeafType, Integer> a = new EnumMap<>(LeafType.class);
+		a.put(LeafType.NORMAL, 7);
+		assertTrue(LeafDiff.delta(a, new EnumMap<>(a)).isEmpty());
+	}
+}
