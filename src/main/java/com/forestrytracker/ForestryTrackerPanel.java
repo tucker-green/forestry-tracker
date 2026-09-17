@@ -54,6 +54,7 @@ class ForestryTrackerPanel extends PluginPanel
 	private static final Color EVENTS_COLOR = new Color(0xc9, 0x85, 0x00);
 	private static final Color XP_COLOR = new Color(0x90, 0x85, 0xe9);
 
+	private static final int CHART_HEIGHT = 104;
 	private static final NumberFormat NUMBER_FORMAT = NumberFormat.getIntegerInstance();
 	private static final DateTimeFormatter DAY_LABEL = DateTimeFormatter.ofPattern("MMM d");
 
@@ -100,7 +101,7 @@ class ForestryTrackerPanel extends PluginPanel
 
 	private final CollapsibleSection chartsSection;
 	private final JPanel chartsTimeSeries = new JPanel();
-	private final BarChart barkPerEventChart = new BarChart("Bark per event", BARK_COLOR, 90);
+	private final BarChart barkPerEventChart = new BarChart("Bark per event", BARK_COLOR, CHART_HEIGHT);
 	private final HBarChart barkByEventTypeChart = new HBarChart("Bark by event type", BARK_COLOR);
 	private BarChart logsBucketChart;
 	private BarChart barkBucketChart;
@@ -135,9 +136,9 @@ class ForestryTrackerPanel extends PluginPanel
 	private final HBarChart lifeLogsChart = new HBarChart("Logs by type", LOGS_COLOR);
 
 	private final CollapsibleSection lifeDaysSection;
-	private final BarChart lifeBarkPerDay = new BarChart("Bark per day", BARK_COLOR, 90);
-	private final BarChart lifeLogsPerDay = new BarChart("Logs per day", LOGS_COLOR, 90);
-	private final BarChart lifeEventsPerDay = new BarChart("Events per day", EVENTS_COLOR, 90);
+	private final BarChart lifeBarkPerDay = new BarChart("Bark per day", BARK_COLOR, CHART_HEIGHT);
+	private final BarChart lifeLogsPerDay = new BarChart("Logs per day", LOGS_COLOR, CHART_HEIGHT);
+	private final BarChart lifeEventsPerDay = new BarChart("Events per day", EVENTS_COLOR, CHART_HEIGHT);
 
 	ForestryTrackerPanel(ForestryTrackerPlugin plugin)
 	{
@@ -421,9 +422,9 @@ class ForestryTrackerPanel extends PluginPanel
 		bucketFactor = factor;
 		int minutes = factor * 5;
 		chartsTimeSeries.removeAll();
-		logsBucketChart = new BarChart("Logs per " + minutes + " min", LOGS_COLOR, 90);
-		barkBucketChart = new BarChart("Bark per " + minutes + " min", BARK_COLOR, 90);
-		xpBucketChart = new BarChart("XP per " + minutes + " min", XP_COLOR, 90);
+		logsBucketChart = new BarChart("Logs per " + minutes + " min", LOGS_COLOR, CHART_HEIGHT);
+		barkBucketChart = new BarChart("Bark per " + minutes + " min", BARK_COLOR, CHART_HEIGHT);
+		xpBucketChart = new BarChart("XP per " + minutes + " min", XP_COLOR, CHART_HEIGHT);
 		chartsTimeSeries.add(logsBucketChart);
 		chartsTimeSeries.add(Box.createVerticalStrut(6));
 		chartsTimeSeries.add(barkBucketChart);
@@ -545,6 +546,10 @@ class ForestryTrackerPanel extends PluginPanel
 		logsBucketChart.setData(logs, null, xStart, xEnd);
 		barkBucketChart.setData(bark, null, xStart, xEnd);
 		xpBucketChart.setData(xp, null, xStart, xEnd);
+		// The newest slice is still filling while the session is active.
+		logsBucketChart.setPartialLast(session.isActive());
+		barkBucketChart.setPartialLast(session.isActive());
+		xpBucketChart.setPartialLast(session.isActive());
 
 		List<EventRecord> completed = new ArrayList<>();
 		for (EventRecord r : session.getHistory())

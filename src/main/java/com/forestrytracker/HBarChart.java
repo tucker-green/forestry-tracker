@@ -36,6 +36,7 @@ class HBarChart extends JComponent
 		setOpaque(true);
 		setBackground(ColorScheme.DARKER_GRAY_COLOR);
 		setFont(FontManager.getRunescapeSmallFont());
+		setAlignmentX(LEFT_ALIGNMENT);
 		updateSize();
 	}
 
