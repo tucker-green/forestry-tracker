@@ -323,6 +323,66 @@ public class ForestrySessionTest
 	}
 
 	@Test
+	public void resumeLastEventReattachesLaterBarkWithoutDoubleCounting()
+	{
+		session.startEvent(ForestryEvent.RISING_ROOTS);
+		session.addBark(11);
+		session.endEvent();
+
+		assertTrue(session.resumeLastEvent());
+		assertEquals(ForestryEvent.RISING_ROOTS, session.getCurrentEvent());
+		assertEquals(11, session.getCurrentEventBark());
+		assertTrue(session.getHistory().isEmpty());
+
+		// Bark after a resume must go straight to the current event, not the 10s grace path.
+		session.addBark(10);
+		assertEquals(21, session.getCurrentEventBark());
+		assertTrue("grace path must not have created a history record", session.getHistory().isEmpty());
+
+		session.endEvent();
+
+		assertEquals(1, session.getHistory().size());
+		assertEquals(21, session.getHistory().get(0).getBark());
+		assertEquals(ForestryEvent.RISING_ROOTS, session.getHistory().get(0).getEvent());
+		assertEquals(1, session.getEventsSeen());
+		assertEquals(1, session.getEventCount(ForestryEvent.RISING_ROOTS));
+		assertEquals(21, session.getBarkForEvent(ForestryEvent.RISING_ROOTS));
+		assertEquals(21, session.getLastEventBark());
+	}
+
+	@Test
+	public void resumeLastEventReturnsFalseWithNoResumableRecord()
+	{
+		assertFalse(session.resumeLastEvent());
+
+		// A standalone "Unknown event" bark record is not resumable.
+		session.addBark(4);
+		assertFalse(session.resumeLastEvent());
+		assertNull(session.getCurrentEvent());
+		assertEquals(1, session.getHistory().size());
+
+		// Not resumable while an event is already current.
+		session.startEvent(ForestryEvent.BEE_HIVE);
+		assertFalse(session.resumeLastEvent());
+	}
+
+	@Test
+	public void isLastRecordIdentifiesTheMostRecentHistoryEntry()
+	{
+		assertFalse(session.isLastRecord(ForestryEvent.RISING_ROOTS));
+
+		session.startEvent(ForestryEvent.RISING_ROOTS);
+		session.endEvent();
+		assertTrue(session.isLastRecord(ForestryEvent.RISING_ROOTS));
+		assertFalse(session.isLastRecord(ForestryEvent.BEE_HIVE));
+
+		session.startEvent(ForestryEvent.BEE_HIVE);
+		session.endEvent();
+		assertTrue(session.isLastRecord(ForestryEvent.BEE_HIVE));
+		assertFalse(session.isLastRecord(ForestryEvent.RISING_ROOTS));
+	}
+
+	@Test
 	public void eventsPerHourComputesRatePerHourWithOneDecimal()
 	{
 		assertEquals(0.0, session.getEventsPerHour(), 0.0001);

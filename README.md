@@ -27,20 +27,21 @@ unless "New session after timeout" is turned off.
 
 ## How it works
 
-- **Bark** is read from the game message `You've been awarded N Anima-infused bark.`
-  Awards that arrive while an event is active (or within 10 seconds of it ending) are added to
-  that event; otherwise they are recorded as an "Unknown event".
+- **Bark** is read from the game message `You've been awarded N Anima-infused bark.`, matched
+  after stripping the message's colour tags (e.g. `<col=0000ff>...</col>`) and chatbox macros
+  (e.g. `@mes_hl_blu@`). Awards that arrive while an event is active (or within 10 seconds of it
+  ending) are added to that event; otherwise they are recorded as an "Unknown event".
 - **Events** are detected from the NPCs and objects each event spawns (the same ids the built-in
   Woodcutting plugin uses). An event ends when all of its NPCs/objects are gone.
-- **Leaves** are counted from changes to your inventory and forestry kit contents. Moving leaves
-  between the kit and inventory, or banking them, is not counted. Leaves withdrawn from the bank
-  are ignored as long as the bank container updates in the same game tick.
+- **Leaves** are counted one at a time from the kit pickup chat message ("Some [type] leaves fall
+  to the ground and you place them into your Forestry kit."), since the client does not reliably
+  push forestry kit contents while the kit is closed for container-based tracking to see.
 
 ## Known limitations
 
 - Only events you are near enough to render are tracked.
-- If the game does not push forestry kit contents while the kit is closed, kit-stored leaves are
-  only counted when you open the kit.
+- Leaves are counted from the kit pickup chat message, so a leaf gained by any other means
+  (e.g. one already in the kit before the plugin started) is not counted.
 - Bark and leaves are only counted for the local player.
 
 ## Building

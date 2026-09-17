@@ -10,12 +10,10 @@ import java.time.LocalDate;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.function.Supplier;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
@@ -24,19 +22,15 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
-import net.runelite.api.Item;
-import net.runelite.api.ItemContainer;
 import net.runelite.api.Skill;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameObjectDespawned;
 import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
-import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.NpcDespawned;
 import net.runelite.api.events.NpcSpawned;
 import net.runelite.api.events.StatChanged;
-import net.runelite.api.gameval.InventoryID;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
@@ -57,18 +51,6 @@ import net.runelite.client.util.ImageUtil;
 )
 public class ForestryTrackerPlugin extends Plugin
 {
-	/**
-	 * Bark award message. The core Woodcutting plugin matches
-	 * "You've been awarded <col=..>N Anima-infused bark</col>."; this is slightly looser about the colour tags.
-	 */
-	private static final Pattern ANIMA_BARK_PATTERN = Pattern.compile(
-		"You(?:'ve| have) been awarded (?:<col=[0-9a-f]+>)?(\\d+) Anima-infused bark(?:</col>)?\\.?",
-		Pattern.CASE_INSENSITIVE);
-
-	/** Log-cutting message; matches the same text the core Woodcutting plugin keys off. */
-	private static final Pattern LOG_CUT_PATTERN = Pattern.compile(
-		"You get (?:some|an) ([\\w ]+?(?:logs?|mushrooms))\\.");
-
 	private static final int PANEL_REFRESH_MS = 1000;
 
 	/** Profile-config keys (per RuneScape character). */
@@ -122,15 +104,6 @@ public class ForestryTrackerPlugin extends Plugin
 	private final Map<ForestryEvent, Set<Object>> liveEntities = new EnumMap<>(ForestryEvent.class);
 	private final Set<ForestryEvent> pendingEnd = EnumSet.noneOf(ForestryEvent.class);
 
-	/** How many ticks an unresolved leaf-container loss is held, awaiting an offsetting gain. */
-	private static final int LEAF_LOSS_HOLD_TICKS = 2;
-
-	/** Last known leaf counts per tracked container (inventory, forestry kit). */
-	private final Map<Integer, Map<LeafType, Integer>> leafSnapshots = new HashMap<>();
-	private final Map<LeafType, Integer> pendingLeaves = new EnumMap<>(LeafType.class);
-	private final Map<LeafType, int[]> heldLeafLoss = new EnumMap<>(LeafType.class);
-	private boolean bankChangedThisTick;
-
 	@Override
 	protected void startUp()
 	{
@@ -178,9 +151,6 @@ public class ForestryTrackerPlugin extends Plugin
 		session = null;
 		lifetime = new LifetimeStats();
 		clearLiveEntities();
-		leafSnapshots.clear();
-		pendingLeaves.clear();
-		heldLeafLoss.clear();
 		lastWcXp = -1;
 		dirty = false;
 	}
@@ -240,10 +210,6 @@ public class ForestryTrackerPlugin extends Plugin
 			case LOGIN_SCREEN:
 			case HOPPING:
 				savePersisted();
-				// Another character may log in next: forget container contents so we don't count their leaves.
-				leafSnapshots.clear();
-				pendingLeaves.clear();
-				heldLeafLoss.clear();
 				// The next StatChanged after login is only a baseline, not a gain.
 				lastWcXp = -1;
 				// fallthrough
@@ -267,40 +233,89 @@ public class ForestryTrackerPlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
-		ChatMessageType type = event.getType();
-		if (type != ChatMessageType.SPAM && type != ChatMessageType.GAMEMESSAGE && type != ChatMessageType.MESBOX)
+		if (handleChatMessage(event.getType(), event.getMessage(), this::activeSession, liveEntities, lifetime, today()))
 		{
-			return;
-		}
-
-		Matcher barkMatcher = ANIMA_BARK_PATTERN.matcher(event.getMessage());
-		if (barkMatcher.find())
-		{
-			int amount = Integer.parseInt(barkMatcher.group(1));
-			ForestrySession s = activeSession();
-			s.addBark(amount);
-			lifetime.addBark(amount, s.getCurrentEvent() != null ? s.getCurrentEvent() : s.getLastEvent(), today());
-			log.debug("Bark awarded: {} (event {}, session total {})", amount, s.getLastEvent(), s.getTotalBark());
 			markDirty();
 			refreshPanel();
-			return;
+		}
+	}
+
+	/**
+	 * The chat-parsing/session-update glue behind {@link #onChatMessage(ChatMessage)}, extracted so
+	 * it can be unit tested without a full RuneLite {@code Client}/Guice context: only pure
+	 * collaborators ({@link ForestrySession}, {@link LifetimeStats}, a plain live-entities map) are
+	 * needed. {@code sessionSupplier} is only invoked once a message actually needs a session (bark,
+	 * leaves, or a log), matching {@link #activeSession()}'s original call sites so an unrelated chat
+	 * line never creates or touches a session.
+	 *
+	 * @return true if session or lifetime state changed and the caller should persist/refresh
+	 */
+	static boolean handleChatMessage(ChatMessageType type, String message, Supplier<ForestrySession> sessionSupplier,
+		Map<ForestryEvent, Set<Object>> liveEntities, LifetimeStats lifetime, String today)
+	{
+		if (type != ChatMessageType.SPAM && type != ChatMessageType.GAMEMESSAGE && type != ChatMessageType.MESBOX)
+		{
+			return false;
+		}
+
+		int barkAmount = ChatParser.parseBark(message);
+		if (barkAmount >= 0)
+		{
+			ForestrySession s = sessionSupplier.get();
+			if (s.getCurrentEvent() == null)
+			{
+				// The player may have stopped participating (rule 1 below) but the event's entities
+				// (and thus the event itself, from the player's point of view) are still around;
+				// reopen it so this bark attaches to it instead of creating an "Unknown event" or
+				// relying on the 10-second grace window.
+				ForestryEvent lastEvent = s.getLastEvent();
+				if (lastEvent != null && !liveEntities.get(lastEvent).isEmpty() && s.isLastRecord(lastEvent))
+				{
+					s.resumeLastEvent();
+					log.debug("Forestry event resumed: {}", lastEvent);
+				}
+			}
+			s.addBark(barkAmount);
+			lifetime.addBark(barkAmount, s.getCurrentEvent() != null ? s.getCurrentEvent() : s.getLastEvent(), today);
+			log.debug("Bark awarded: {} (event {}, session total {})", barkAmount, s.getLastEvent(), s.getTotalBark());
+			return true;
 		}
 
 		if (type != ChatMessageType.SPAM && type != ChatMessageType.GAMEMESSAGE)
 		{
-			return;
+			return false;
 		}
 
-		Matcher logMatcher = LOG_CUT_PATTERN.matcher(event.getMessage());
-		if (logMatcher.find())
+		LeafType leafType = ChatParser.parseLeaves(message);
+		if (leafType != null)
 		{
-			String logType = capitalize(logMatcher.group(1));
-			activeSession().addLog(logType);
-			lifetime.addLog(logType, today());
-			log.debug("Log cut: {}", logType);
-			markDirty();
-			refreshPanel();
+			sessionSupplier.get().addLeaves(leafType, 1);
+			lifetime.addLeaves(leafType, 1, today);
+			log.debug("Leaf collected: {}", leafType);
+			return true;
 		}
+
+		String logType = ChatParser.parseLog(message);
+		if (logType != null)
+		{
+			ForestrySession s = sessionSupplier.get();
+			ForestryEvent current = s.getCurrentEvent();
+			if (current != null && s.getCurrentEventBark() > 0)
+			{
+				// The player went back to chopping after collecting bark from this event: end their
+				// participation now rather than waiting for the (possibly much later) despawn of its
+				// entities. Events with no bark yet (e.g. a Leprechaun, or one the player never
+				// engaged with) are left running.
+				s.endEvent();
+				log.debug("Forestry event ended: {} (player resumed chopping)", current);
+			}
+			s.addLog(logType);
+			lifetime.addLog(logType, today);
+			log.debug("Log cut: {}", logType);
+			return true;
+		}
+
+		return false;
 	}
 
 	@Subscribe
@@ -371,76 +386,8 @@ public class ForestryTrackerPlugin extends Plugin
 	}
 
 	@Subscribe
-	public void onItemContainerChanged(ItemContainerChanged event)
-	{
-		int id = event.getContainerId();
-		if (id == InventoryID.BANK)
-		{
-			bankChangedThisTick = true;
-			return;
-		}
-		if (id != InventoryID.INV && id != InventoryID.FORESTRY_KIT)
-		{
-			return;
-		}
-
-		ItemContainer container = event.getItemContainer();
-		if (container == null)
-		{
-			return;
-		}
-
-		Item[] items = container.getItems();
-		int[] ids = new int[items.length];
-		int[] quantities = new int[items.length];
-		for (int i = 0; i < items.length; i++)
-		{
-			ids[i] = items[i].getId();
-			quantities[i] = items[i].getQuantity();
-		}
-
-		Map<LeafType, Integer> counts = LeafDiff.count(ids, quantities);
-		Map<LeafType, Integer> previous = leafSnapshots.put(id, counts);
-		if (previous == null)
-		{
-			// First sight of this container only seeds the snapshot.
-			return;
-		}
-
-		LeafDiff.accumulate(pendingLeaves, LeafDiff.delta(previous, counts));
-	}
-
-	@Subscribe
 	public void onGameTick(GameTick tick)
 	{
-		// Leaves: apply the net change across inventory + kit for this tick. A kit<->inventory
-		// transfer (or a bank move) usually nets to zero within one tick, but its two container
-		// updates can land a tick apart, so unresolved losses are held briefly for an offsetting
-		// gain rather than being discarded outright (see LeafDiff.resolve()).
-		if (bankChangedThisTick)
-		{
-			// A withdrawal/deposit this tick isn't a real gain or loss to attribute.
-			pendingLeaves.clear();
-			heldLeafLoss.clear();
-		}
-		else if (!pendingLeaves.isEmpty() || !heldLeafLoss.isEmpty())
-		{
-			Map<LeafType, Integer> gains = LeafDiff.resolve(pendingLeaves, heldLeafLoss, LEAF_LOSS_HOLD_TICKS);
-			pendingLeaves.clear();
-			if (!gains.isEmpty())
-			{
-				for (Map.Entry<LeafType, Integer> e : gains.entrySet())
-				{
-					activeSession().addLeaves(e.getKey(), e.getValue());
-					lifetime.addLeaves(e.getKey(), e.getValue(), today());
-				}
-				log.debug("Leaves gained: {}", gains);
-				markDirty();
-				refreshPanel();
-			}
-		}
-		bankChangedThisTick = false;
-
 		// Events whose entities all despawned last tick and did not come back are over.
 		if (!pendingEnd.isEmpty())
 		{
@@ -480,18 +427,62 @@ public class ForestryTrackerPlugin extends Plugin
 	private void entitySpawned(ForestryEvent event, Object entity)
 	{
 		Set<Object> set = liveEntities.get(event);
+		boolean wasEmpty = set.isEmpty();
 		set.add(entity);
 		pendingEnd.remove(event);
+
+		if (!wasEmpty)
+		{
+			// Another entity of an event that's already ongoing (e.g. a new glowing root while
+			// others are still up). This is not a new occurrence, even if rule 1 already ended the
+			// player's participation in it (leaving currentEvent null while the set stays non-empty):
+			// only the transition from no live entities to one starts a new event.
+			return;
+		}
 
 		ForestrySession s = activeSession();
 		if (s.getCurrentEvent() != event)
 		{
-			s.startEvent(event);
-			lifetime.addEvent(event, today());
-			log.debug("Forestry event started: {}", event);
+			if (startOrResumeEvent(s, event))
+			{
+				lifetime.addEvent(event, today());
+				log.debug("Forestry event started: {}", event);
+			}
+			else
+			{
+				log.debug("Forestry event resumed: {}", event);
+			}
 			markDirty();
 			refreshPanel();
 		}
+	}
+
+	/**
+	 * Decides whether a newly-live entity for {@code event} (the transition from no live entities to
+	 * one, per {@link #entitySpawned(ForestryEvent, Object)}) is a genuinely new occurrence or the
+	 * continuation of one whose participation had already ended - by the log-cut rule in {@link
+	 * #handleChatMessage}, or a despawn/respawn that happened to straddle a tick boundary rather than
+	 * landing within the same tick (only the latter is covered by the {@code pendingEnd} add/remove
+	 * dance in {@link #entitySpawned}/{@link #entityDespawned}). Mirrors the {@code
+	 * resumeLastEvent()}/{@code isLastRecord()} check {@link #handleChatMessage} already does for
+	 * bark awards, so an entity-spawn reopen merges back into the same history record instead of
+	 * bumping {@code eventsSeen} and splitting the occurrence across two records.
+	 *
+	 * <p>Extracted (package-private, static) so this decision is unit testable directly against a
+	 * {@link ForestrySession} without a RuneLite {@code Client}/Guice context.
+	 *
+	 * @return true if a new event was started; false if the last completed record was reopened instead
+	 */
+	static boolean startOrResumeEvent(ForestrySession s, ForestryEvent event)
+	{
+		if (s.getCurrentEvent() == null && event.equals(s.getLastEvent()) && s.isLastRecord(event))
+		{
+			s.resumeLastEvent();
+			return false;
+		}
+
+		s.startEvent(event);
+		return true;
 	}
 
 	private void entityDespawned(ForestryEvent event, Object entity)
@@ -527,15 +518,6 @@ public class ForestryTrackerPlugin extends Plugin
 	private static String today()
 	{
 		return LocalDate.now().toString();
-	}
-
-	private static String capitalize(String s)
-	{
-		if (s == null || s.isEmpty())
-		{
-			return s;
-		}
-		return Character.toUpperCase(s.charAt(0)) + s.substring(1);
 	}
 
 	private void clearLiveEntities()

@@ -259,6 +259,50 @@ public class ForestrySession
 		touch();
 	}
 
+	/**
+	 * Re-opens the most recently completed event so it becomes current again, e.g. when the
+	 * plugin ended it early (the player stopped participating) but the entities are still around
+	 * and later bark should attach to the same event rather than double-counting it. Does not
+	 * touch {@link #eventsSeen} or the per-event counts: it is the same event, not a new one.
+	 * {@link #lastEventEnd} is cleared since the event is active again, not ended.
+	 *
+	 * @return true if a record was reopened; false if there is no history, or the most recent
+	 * record is a standalone "Unknown event" bark award (nothing to reopen).
+	 */
+	public boolean resumeLastEvent()
+	{
+		if (currentEvent != null || history.isEmpty())
+		{
+			return false;
+		}
+
+		EventRecord record = history.get(0);
+		if (record.getEvent() == null)
+		{
+			return false;
+		}
+
+		history.remove(0);
+		currentEvent = record.getEvent();
+		currentEventStart = record.getStart();
+		currentEventBark = record.getBark();
+		lastEvent = record.getEvent();
+		lastEventStart = record.getStart();
+		lastEventEnd = null;
+		touch();
+		return true;
+	}
+
+	/**
+	 * Whether {@code event} is the event of the most recent history record, i.e. the record
+	 * {@link #resumeLastEvent()} would reopen. Lets the plugin decide whether entities it still
+	 * sees for {@code event} belong to that record before deciding to reopen it.
+	 */
+	public boolean isLastRecord(@Nullable ForestryEvent event)
+	{
+		return !history.isEmpty() && history.get(0).getEvent() == event;
+	}
+
 	/** Called when the current event's NPCs/objects are all gone. */
 	public void endEvent()
 	{
