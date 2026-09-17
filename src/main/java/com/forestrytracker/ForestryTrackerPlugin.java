@@ -5,6 +5,8 @@ import com.google.gson.JsonSyntaxException;
 import com.google.inject.Provides;
 import java.awt.image.BufferedImage;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -24,6 +26,7 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
+import net.runelite.api.Skill;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameObjectDespawned;
 import net.runelite.api.events.GameObjectSpawned;
@@ -32,11 +35,13 @@ import net.runelite.api.events.GameTick;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.NpcDespawned;
 import net.runelite.api.events.NpcSpawned;
+import net.runelite.api.events.StatChanged;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.events.RuneScapeProfileChanged;
+import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
@@ -59,6 +64,10 @@ public class ForestryTrackerPlugin extends Plugin
 	private static final Pattern ANIMA_BARK_PATTERN = Pattern.compile(
 		"You(?:'ve| have) been awarded (?:<col=[0-9a-f]+>)?(\\d+) Anima-infused bark(?:</col>)?\\.?",
 		Pattern.CASE_INSENSITIVE);
+
+	/** Log-cutting message; matches the same text the core Woodcutting plugin keys off. */
+	private static final Pattern LOG_CUT_PATTERN = Pattern.compile(
+		"You get (?:some|an) ([\\w ]+?(?:logs?|mushrooms))\\.");
 
 	private static final int PANEL_REFRESH_MS = 1000;
 
@@ -89,6 +98,10 @@ public class ForestryTrackerPlugin extends Plugin
 	@Inject
 	private Gson gson;
 
+	@Inject
+	@Getter
+	private ItemManager itemManager;
+
 	@Getter
 	private ForestrySession session;
 
@@ -99,13 +112,23 @@ public class ForestryTrackerPlugin extends Plugin
 	private NavigationButton navButton;
 	private Timer panelTimer;
 
+	/** Woodcutting XP at the last {@link StatChanged}; -1 means "not yet known" (just logged in). */
+	private long lastWcXp = -1;
+
+	/** Set on any change since the last {@link #savePersisted()}; flushed at most once per game tick. */
+	private boolean dirty;
+
 	/** Live NPCs / GameObjects per event; an event is over when its set stays empty for a tick. */
 	private final Map<ForestryEvent, Set<Object>> liveEntities = new EnumMap<>(ForestryEvent.class);
 	private final Set<ForestryEvent> pendingEnd = EnumSet.noneOf(ForestryEvent.class);
 
+	/** How many ticks an unresolved leaf-container loss is held, awaiting an offsetting gain. */
+	private static final int LEAF_LOSS_HOLD_TICKS = 2;
+
 	/** Last known leaf counts per tracked container (inventory, forestry kit). */
 	private final Map<Integer, Map<LeafType, Integer>> leafSnapshots = new HashMap<>();
 	private final Map<LeafType, Integer> pendingLeaves = new EnumMap<>(LeafType.class);
+	private final Map<LeafType, int[]> heldLeafLoss = new EnumMap<>(LeafType.class);
 	private boolean bankChangedThisTick;
 
 	@Override
@@ -157,6 +180,9 @@ public class ForestryTrackerPlugin extends Plugin
 		clearLiveEntities();
 		leafSnapshots.clear();
 		pendingLeaves.clear();
+		heldLeafLoss.clear();
+		lastWcXp = -1;
+		dirty = false;
 	}
 
 	@Provides
@@ -178,6 +204,13 @@ public class ForestryTrackerPlugin extends Plugin
 		refreshPanel();
 	}
 
+	public void resetLifetime()
+	{
+		lifetime = new LifetimeStats();
+		savePersisted();
+		refreshPanel();
+	}
+
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
@@ -187,10 +220,8 @@ public class ForestryTrackerPlugin extends Plugin
 		}
 		if (ForestryTrackerConfig.RESET_LIFETIME_KEY.equals(event.getKey()) && config.resetLifetimeBark())
 		{
-			lifetime = new LifetimeStats();
-			savePersisted();
+			resetLifetime();
 			configManager.setConfiguration(ForestryTrackerConfig.GROUP, ForestryTrackerConfig.RESET_LIFETIME_KEY, false);
-			refreshPanel();
 		}
 	}
 
@@ -212,6 +243,9 @@ public class ForestryTrackerPlugin extends Plugin
 				// Another character may log in next: forget container contents so we don't count their leaves.
 				leafSnapshots.clear();
 				pendingLeaves.clear();
+				heldLeafLoss.clear();
+				// The next StatChanged after login is only a baseline, not a gain.
+				lastWcXp = -1;
 				// fallthrough
 			case LOADING:
 				// Entities are re-spawned after a scene load; if the current event's entities don't come back
@@ -233,26 +267,67 @@ public class ForestryTrackerPlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
-		if (event.getType() != ChatMessageType.SPAM
-			&& event.getType() != ChatMessageType.GAMEMESSAGE
-			&& event.getType() != ChatMessageType.MESBOX)
+		ChatMessageType type = event.getType();
+		if (type != ChatMessageType.SPAM && type != ChatMessageType.GAMEMESSAGE && type != ChatMessageType.MESBOX)
 		{
 			return;
 		}
 
-		Matcher matcher = ANIMA_BARK_PATTERN.matcher(event.getMessage());
-		if (!matcher.find())
+		Matcher barkMatcher = ANIMA_BARK_PATTERN.matcher(event.getMessage());
+		if (barkMatcher.find())
+		{
+			int amount = Integer.parseInt(barkMatcher.group(1));
+			ForestrySession s = activeSession();
+			s.addBark(amount);
+			lifetime.addBark(amount, s.getCurrentEvent() != null ? s.getCurrentEvent() : s.getLastEvent(), today());
+			log.debug("Bark awarded: {} (event {}, session total {})", amount, s.getLastEvent(), s.getTotalBark());
+			markDirty();
+			refreshPanel();
+			return;
+		}
+
+		if (type != ChatMessageType.SPAM && type != ChatMessageType.GAMEMESSAGE)
 		{
 			return;
 		}
 
-		int amount = Integer.parseInt(matcher.group(1));
-		ForestrySession s = activeSession();
-		s.addBark(amount);
-		lifetime.addBark(amount, s.getCurrentEvent() != null ? s.getCurrentEvent() : s.getLastEvent());
-		log.debug("Bark awarded: {} (event {}, session total {})", amount, s.getLastEvent(), s.getTotalBark());
-		savePersisted();
-		refreshPanel();
+		Matcher logMatcher = LOG_CUT_PATTERN.matcher(event.getMessage());
+		if (logMatcher.find())
+		{
+			String logType = capitalize(logMatcher.group(1));
+			activeSession().addLog(logType);
+			lifetime.addLog(logType, today());
+			log.debug("Log cut: {}", logType);
+			markDirty();
+			refreshPanel();
+		}
+	}
+
+	@Subscribe
+	public void onStatChanged(StatChanged event)
+	{
+		if (event.getSkill() != Skill.WOODCUTTING)
+		{
+			return;
+		}
+
+		long xp = event.getXp();
+		if (lastWcXp < 0)
+		{
+			// First reading after login (or plugin start): establish the baseline only.
+			lastWcXp = xp;
+			return;
+		}
+
+		long delta = xp - lastWcXp;
+		lastWcXp = xp;
+		if (delta > 0)
+		{
+			activeSession().addXp(delta);
+			lifetime.addXp(delta, today());
+			markDirty();
+			refreshPanel();
+		}
 	}
 
 	@Subscribe
@@ -338,29 +413,31 @@ public class ForestryTrackerPlugin extends Plugin
 	@Subscribe
 	public void onGameTick(GameTick tick)
 	{
-		// Leaves: apply the net change across inventory + kit for this tick.
-		if (!pendingLeaves.isEmpty())
+		// Leaves: apply the net change across inventory + kit for this tick. A kit<->inventory
+		// transfer (or a bank move) usually nets to zero within one tick, but its two container
+		// updates can land a tick apart, so unresolved losses are held briefly for an offsetting
+		// gain rather than being discarded outright (see LeafDiff.resolve()).
+		if (bankChangedThisTick)
 		{
-			if (!bankChangedThisTick)
-			{
-				boolean gained = false;
-				for (Map.Entry<LeafType, Integer> e : pendingLeaves.entrySet())
-				{
-					if (e.getValue() > 0)
-					{
-						activeSession().addLeaves(e.getKey(), e.getValue());
-						lifetime.addLeaves(e.getKey(), e.getValue());
-						gained = true;
-					}
-				}
-				if (gained)
-				{
-					log.debug("Leaves gained: {}", pendingLeaves);
-					savePersisted();
-					refreshPanel();
-				}
-			}
+			// A withdrawal/deposit this tick isn't a real gain or loss to attribute.
 			pendingLeaves.clear();
+			heldLeafLoss.clear();
+		}
+		else if (!pendingLeaves.isEmpty() || !heldLeafLoss.isEmpty())
+		{
+			Map<LeafType, Integer> gains = LeafDiff.resolve(pendingLeaves, heldLeafLoss, LEAF_LOSS_HOLD_TICKS);
+			pendingLeaves.clear();
+			if (!gains.isEmpty())
+			{
+				for (Map.Entry<LeafType, Integer> e : gains.entrySet())
+				{
+					activeSession().addLeaves(e.getKey(), e.getValue());
+					lifetime.addLeaves(e.getKey(), e.getValue(), today());
+				}
+				log.debug("Leaves gained: {}", gains);
+				markDirty();
+				refreshPanel();
+			}
 		}
 		bankChangedThisTick = false;
 
@@ -373,7 +450,7 @@ public class ForestryTrackerPlugin extends Plugin
 				{
 					session.endEvent();
 					log.debug("Forestry event ended: {}", event);
-					savePersisted();
+					markDirty();
 					refreshPanel();
 				}
 			}
@@ -387,9 +464,16 @@ public class ForestryTrackerPlugin extends Plugin
 			if (session.getCurrentEvent() == null && session.getTimeSinceActivity().compareTo(timeout) >= 0)
 			{
 				session.setActive(false);
-				savePersisted();
+				markDirty();
 				refreshPanel();
 			}
+		}
+
+		// Coalesce persistence: at most one profile-config write per tick, regardless of how many
+		// of the handlers above fired this tick.
+		if (dirty)
+		{
+			savePersisted();
 		}
 	}
 
@@ -403,9 +487,9 @@ public class ForestryTrackerPlugin extends Plugin
 		if (s.getCurrentEvent() != event)
 		{
 			s.startEvent(event);
-			lifetime.addEvent(event);
+			lifetime.addEvent(event, today());
 			log.debug("Forestry event started: {}", event);
-			savePersisted();
+			markDirty();
 			refreshPanel();
 		}
 	}
@@ -433,6 +517,25 @@ public class ForestryTrackerPlugin extends Plugin
 			session.touch();
 		}
 		return session;
+	}
+
+	private void markDirty()
+	{
+		dirty = true;
+	}
+
+	private static String today()
+	{
+		return LocalDate.now().toString();
+	}
+
+	private static String capitalize(String s)
+	{
+		if (s == null || s.isEmpty())
+		{
+			return s;
+		}
+		return Character.toUpperCase(s.charAt(0)) + s.substring(1);
 	}
 
 	private void clearLiveEntities()
@@ -478,7 +581,7 @@ public class ForestryTrackerPlugin extends Plugin
 			Integer legacy = configManager.getRSProfileConfiguration(ForestryTrackerConfig.GROUP, LEGACY_LIFETIME_BARK_KEY, Integer.class);
 			if (legacy != null && legacy > 0)
 			{
-				loaded.addBark(legacy, null);
+				loaded.addBark(legacy, null, null);
 				configManager.unsetRSProfileConfiguration(ForestryTrackerConfig.GROUP, LEGACY_LIFETIME_BARK_KEY);
 			}
 		}
@@ -499,6 +602,17 @@ public class ForestryTrackerPlugin extends Plugin
 			catch (RuntimeException e)
 			{
 				log.warn("Discarding unreadable session", e);
+			}
+		}
+		if (restored != null && restored.isActive())
+		{
+			// A session persisted as active is never re-touched while the client is closed, so a
+			// stale lastActivity here means it actually timed out (e.g. the player logged out, or
+			// the client crashed, mid-session) and must not silently resume with a days-old start.
+			Duration timeout = Duration.ofMinutes(config.statTimeout());
+			if (Duration.between(restored.getLastActivity(), Instant.now()).compareTo(timeout) >= 0)
+			{
+				restored.setActive(false);
 			}
 		}
 		session = restored;
@@ -524,6 +638,7 @@ public class ForestryTrackerPlugin extends Plugin
 		{
 			configManager.setRSProfileConfiguration(ForestryTrackerConfig.GROUP, SESSION_KEY, gson.toJson(session.toState()));
 		}
+		dirty = false;
 	}
 
 	private void refreshPanel()

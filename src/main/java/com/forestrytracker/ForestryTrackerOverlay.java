@@ -82,6 +82,26 @@ class ForestryTrackerOverlay extends OverlayPanel
 				.build());
 		}
 
+		if (config.showLogs())
+		{
+			panelComponent.getChildren().add(LineComponent.builder()
+				.left("Logs:")
+				.right(Integer.toString(session.getLogsCut()))
+				.build());
+			panelComponent.getChildren().add(LineComponent.builder()
+				.left("Logs/hr:")
+				.right(formatRate(session.getLogsPerHour()))
+				.build());
+		}
+
+		if (config.showXp())
+		{
+			panelComponent.getChildren().add(LineComponent.builder()
+				.left("XP/hr:")
+				.right(formatRate(session.getXpPerHour()))
+				.build());
+		}
+
 		if (config.showSessionBark())
 		{
 			panelComponent.getChildren().add(LineComponent.builder()
@@ -130,6 +150,16 @@ class ForestryTrackerOverlay extends OverlayPanel
 		}
 
 		return super.render(graphics);
+	}
+
+	/** Formats a per-hour rate, abbreviating to e.g. "12.4k" once it reaches 10,000. */
+	static String formatRate(long value)
+	{
+		if (value >= 10_000)
+		{
+			return String.format("%.1fk", value / 1000.0);
+		}
+		return Long.toString(value);
 	}
 
 	static String formatDuration(Duration d)

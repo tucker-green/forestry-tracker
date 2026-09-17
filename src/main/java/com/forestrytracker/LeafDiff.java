@@ -50,4 +50,56 @@ final class LeafDiff
 			accumulator.merge(e.getKey(), e.getValue(), Integer::sum);
 		}
 	}
+
+	/**
+	 * Resolves one tick's container delta against unresolved losses carried over from recent
+	 * prior ticks, and returns the per-type amounts to credit as gains this tick. A kit&lt;-&gt;
+	 * inventory transfer (or a bank move) usually nets to zero within a single tick, but its two
+	 * container updates can land a tick apart; an unresolved loss is held here so a same-type
+	 * gain arriving shortly after still cancels it out instead of being counted as a real pickup.
+	 *
+	 * <p>{@code held} is mutated in place: {@code held.get(type)[0]} is the outstanding (negative)
+	 * amount and {@code [1]} the ticks remaining before it is given up on as a genuine, untracked
+	 * loss. A type touched by {@code tickDelta} has its countdown refreshed to {@code holdTicks};
+	 * an untouched one just ages down.
+	 */
+	static Map<LeafType, Integer> resolve(Map<LeafType, Integer> tickDelta, Map<LeafType, int[]> held, int holdTicks)
+	{
+		Map<LeafType, Integer> combined = new EnumMap<>(LeafType.class);
+		for (Map.Entry<LeafType, int[]> e : held.entrySet())
+		{
+			combined.put(e.getKey(), e.getValue()[0]);
+		}
+		for (Map.Entry<LeafType, Integer> e : tickDelta.entrySet())
+		{
+			combined.merge(e.getKey(), e.getValue(), Integer::sum);
+		}
+
+		Map<LeafType, Integer> gains = new EnumMap<>(LeafType.class);
+		Map<LeafType, int[]> newHeld = new EnumMap<>(LeafType.class);
+		for (Map.Entry<LeafType, Integer> e : combined.entrySet())
+		{
+			LeafType type = e.getKey();
+			int amount = e.getValue();
+			if (amount > 0)
+			{
+				gains.put(type, amount);
+			}
+			else if (amount < 0)
+			{
+				int[] prior = held.get(type);
+				boolean touched = tickDelta.containsKey(type);
+				int ticksLeft = touched || prior == null ? holdTicks : prior[1] - 1;
+				if (ticksLeft > 0)
+				{
+					newHeld.put(type, new int[]{amount, ticksLeft});
+				}
+				// else: never offset within the grace window -- a genuine, untracked loss.
+			}
+		}
+
+		held.clear();
+		held.putAll(newHeld);
+		return gains;
+	}
 }

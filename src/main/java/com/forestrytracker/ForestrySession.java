@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
@@ -18,6 +19,16 @@ import lombok.Setter;
 public class ForestrySession
 {
 	private static final int MAX_HISTORY = 100;
+
+	/**
+	 * Cap on the number of timeline slices kept, oldest dropped first. Bounds memory/JSON size
+	 * for a session whose {@code start} is very old (e.g. a stale multi-day session touched back
+	 * to life) instead of backfilling one slice per {@link #BUCKET} all the way from start.
+	 */
+	private static final int MAX_TIMELINE = 288;
+
+	/** Width of one timeline slice. */
+	static final Duration BUCKET = Duration.ofMinutes(5);
 
 	/**
 	 * A bark award arriving this soon after an event ended is attributed to that event
@@ -53,11 +64,24 @@ public class ForestrySession
 	private Instant lastBarkAward;
 	@Getter
 	private int eventsSeen;
+	@Getter
+	private int logsCut;
+	@Getter
+	private long xpGained;
+
+	/**
+	 * Total idle time excluded from {@link #getDuration()}: accumulated whenever {@link #touch()}
+	 * reactivates a session that had timed out, so a long-idle-then-resumed session doesn't have
+	 * that idle gap flood back into per-hour rates.
+	 */
+	private long pausedMillis;
 
 	private final Map<ForestryEvent, Integer> eventCounts = new EnumMap<>(ForestryEvent.class);
 	private final Map<ForestryEvent, Integer> barkByEvent = new EnumMap<>(ForestryEvent.class);
 	private final Map<LeafType, Integer> leaves = new EnumMap<>(LeafType.class);
+	private final Map<String, Integer> logsByType = new LinkedHashMap<>();
 	private final List<EventRecord> history = new ArrayList<>();
+	private final List<TimeBucket> timeline = new ArrayList<>();
 
 	@Getter
 	@Nullable
@@ -99,6 +123,9 @@ public class ForestrySession
 		this.lastEventEnd = toInstant(state.lastEventEnd);
 		this.lastBarkAward = toInstant(state.lastBarkAward);
 		this.eventsSeen = state.eventsSeen;
+		this.logsCut = state.logsCut;
+		this.xpGained = state.xpGained;
+		this.pausedMillis = state.pausedMillis;
 		if (state.eventCounts != null)
 		{
 			state.eventCounts.forEach((k, v) -> putIfPresent(eventCounts, k, v));
@@ -110,6 +137,10 @@ public class ForestrySession
 		if (state.leaves != null)
 		{
 			state.leaves.forEach((k, v) -> putIfPresent(leaves, k, v));
+		}
+		if (state.logsByType != null)
+		{
+			state.logsByType.forEach((k, v) -> putIfPresent(logsByType, k, v));
 		}
 		if (state.history != null)
 		{
@@ -124,6 +155,20 @@ public class ForestrySession
 				{
 					break;
 				}
+			}
+		}
+		if (state.timeline != null)
+		{
+			for (TimeBucket b : state.timeline)
+			{
+				if (b != null)
+				{
+					timeline.add(b);
+				}
+			}
+			while (timeline.size() > MAX_TIMELINE)
+			{
+				timeline.remove(0);
 			}
 		}
 	}
@@ -142,9 +187,14 @@ public class ForestrySession
 		state.lastEventEnd = toMillis(lastEventEnd);
 		state.lastBarkAward = toMillis(lastBarkAward);
 		state.eventsSeen = eventsSeen;
+		state.logsCut = logsCut;
+		state.xpGained = xpGained;
+		state.pausedMillis = pausedMillis;
 		state.eventCounts.putAll(eventCounts);
 		state.barkByEvent.putAll(barkByEvent);
 		state.leaves.putAll(leaves);
+		state.logsByType.putAll(logsByType);
+		state.timeline.addAll(timeline);
 
 		if (currentEvent != null)
 		{
@@ -167,30 +217,25 @@ public class ForestrySession
 		return state;
 	}
 
-	private static <K> void putIfPresent(Map<K, Integer> map, K key, Integer value)
-	{
-		if (key != null && value != null)
-		{
-			map.put(key, value);
-		}
-	}
+	// --- mutation ----------------------------------------------------------------------------------------------
 
-	@Nullable
-	private static Instant toInstant(@Nullable Long millis)
-	{
-		return millis == null ? null : Instant.ofEpochMilli(millis);
-	}
-
-	@Nullable
-	private static Long toMillis(@Nullable Instant instant)
-	{
-		return instant == null ? null : instant.toEpochMilli();
-	}
-
-	/** Marks the session as active right now. */
+	/**
+	 * Marks the session as active right now. Reactivating a session that had timed out excludes
+	 * the idle gap since it went inactive from {@link #getDuration()}, so resuming after a long
+	 * pause doesn't flood that idle time back into per-hour rates.
+	 */
 	public void touch()
 	{
-		lastActivity = clock.get();
+		Instant now = clock.get();
+		if (!active)
+		{
+			Duration idle = Duration.between(lastActivity, now);
+			if (!idle.isNegative())
+			{
+				pausedMillis += idle.toMillis();
+			}
+		}
+		lastActivity = now;
 		active = true;
 	}
 
@@ -210,6 +255,7 @@ public class ForestrySession
 		lastEventStart = now;
 		eventsSeen++;
 		eventCounts.merge(event, 1, Integer::sum);
+		bucket().events++;
 		touch();
 	}
 
@@ -238,6 +284,7 @@ public class ForestrySession
 		Instant now = clock.get();
 		totalBark += amount;
 		lastBarkAward = now;
+		bucket().bark += amount;
 		touch();
 
 		if (currentEvent != null)
@@ -277,8 +324,32 @@ public class ForestrySession
 			return;
 		}
 		leaves.merge(type, amount, Integer::sum);
+		bucket().leaves += amount;
 		touch();
 	}
+
+	/** Records one log (or mushroom) cut; {@code type} is the display name, e.g. "Oak logs". */
+	public void addLog(String type)
+	{
+		logsCut++;
+		logsByType.merge(type, 1, Integer::sum);
+		bucket().logs++;
+		touch();
+	}
+
+	/** Records Woodcutting experience gained. */
+	public void addXp(long delta)
+	{
+		if (delta <= 0)
+		{
+			return;
+		}
+		xpGained += delta;
+		bucket().xp += delta;
+		touch();
+	}
+
+	// --- queries -----------------------------------------------------------------------------------------------
 
 	public int getLeaves(LeafType type)
 	{
@@ -305,25 +376,105 @@ public class ForestrySession
 		return barkByEvent.getOrDefault(event, 0);
 	}
 
+	public Map<String, Integer> getLogsByType()
+	{
+		return Collections.unmodifiableMap(logsByType);
+	}
+
 	/** Newest first. */
 	public List<EventRecord> getHistory()
 	{
 		return Collections.unmodifiableList(history);
 	}
 
-	/** Bark per hour over the whole session, computed live so it stays current between awards. */
+	/** Oldest first; one entry per {@link #BUCKET} from the session start up to the last activity. */
+	public List<TimeBucket> getTimeline()
+	{
+		return Collections.unmodifiableList(timeline);
+	}
+
+	/** Elapsed session time: up to now while active, frozen at the last activity once timed out. */
+	public Duration getDuration()
+	{
+		Instant end = active ? clock.get() : lastActivity;
+		Duration d = Duration.between(start, end).minus(Duration.ofMillis(pausedMillis));
+		return d.isNegative() ? Duration.ZERO : d;
+	}
+
 	public int getBarkPerHour()
 	{
-		if (totalBark <= 0)
+		return (int) perHour(totalBark);
+	}
+
+	public int getLogsPerHour()
+	{
+		return (int) perHour(logsCut);
+	}
+
+	public long getXpPerHour()
+	{
+		return perHour(xpGained);
+	}
+
+	public int getLeavesPerHour()
+	{
+		return (int) perHour(getTotalLeaves());
+	}
+
+	/** Events per hour, with one decimal of precision (e.g. 4.5). */
+	public double getEventsPerHour()
+	{
+		long ms = getDuration().toMillis();
+		if (eventsSeen == 0 || ms <= 0)
 		{
 			return 0;
 		}
-		long elapsedMs = Duration.between(start, clock.get()).toMillis();
-		if (elapsedMs <= 0)
+		return Math.round(eventsSeen * 36_000_000.0 / ms) / 10.0;
+	}
+
+	public int getAverageBarkPerEvent()
+	{
+		return eventsSeen == 0 ? 0 : Math.round((float) totalBark / eventsSeen);
+	}
+
+	/** The completed event that awarded the most bark, or null. */
+	@Nullable
+	public EventRecord getBestEvent()
+	{
+		EventRecord best = null;
+		for (EventRecord r : history)
 		{
-			return 0;
+			if (r.getEvent() != null && (best == null || r.getBark() > best.getBark()))
+			{
+				best = r;
+			}
 		}
-		return (int) ((double) totalBark * Duration.ofHours(1).toMillis() / elapsedMs);
+		return best;
+	}
+
+	/** Mean time between consecutive event starts, or null with fewer than two events. */
+	@Nullable
+	public Duration getAverageEventGap()
+	{
+		List<Instant> starts = new ArrayList<>();
+		if (currentEventStart != null)
+		{
+			starts.add(currentEventStart);
+		}
+		for (EventRecord r : history)
+		{
+			if (r.getEvent() != null)
+			{
+				starts.add(r.getStart());
+			}
+		}
+		if (starts.size() < 2)
+		{
+			return null;
+		}
+		Collections.sort(starts);
+		long total = Duration.between(starts.get(0), starts.get(starts.size() - 1)).toMillis();
+		return Duration.ofMillis(total / (starts.size() - 1));
 	}
 
 	/** Time since the most recent event began (or, failing that, the most recent bark award). */
@@ -343,6 +494,51 @@ public class ForestrySession
 		return Duration.between(lastActivity, clock.get());
 	}
 
+	// --- internals ---------------------------------------------------------------------------------------------
+
+	private long perHour(long count)
+	{
+		if (count <= 0)
+		{
+			return 0;
+		}
+		long ms = getDuration().toMillis();
+		if (ms <= 0)
+		{
+			return 0;
+		}
+		return (long) ((double) count * Duration.ofHours(1).toMillis() / ms);
+	}
+
+	/**
+	 * The timeline slice containing "now", creating empty slices up to it as needed. Drops the
+	 * oldest slices first so a session whose activity resumes long after {@code start} (e.g. a
+	 * stale multi-day session restored from disk) can't grow this list without bound.
+	 */
+	private TimeBucket bucket()
+	{
+		long bucketMs = BUCKET.toMillis();
+		long idx = Math.max(0, Duration.between(start, clock.get()).toMillis() / bucketMs);
+
+		while (!timeline.isEmpty() && idx - firstBucketIndex(bucketMs) >= MAX_TIMELINE)
+		{
+			timeline.remove(0);
+		}
+
+		long base = timeline.isEmpty() ? Math.max(0, idx - MAX_TIMELINE + 1) : firstBucketIndex(bucketMs);
+		while (timeline.size() <= idx - base)
+		{
+			timeline.add(new TimeBucket(start.toEpochMilli() + (base + timeline.size()) * bucketMs));
+		}
+		return timeline.get((int) (idx - base));
+	}
+
+	/** Absolute (from {@code start}) bucket index of the oldest slice currently kept. */
+	private long firstBucketIndex(long bucketMs)
+	{
+		return (timeline.get(0).start - start.toEpochMilli()) / bucketMs;
+	}
+
 	private void addHistory(EventRecord record)
 	{
 		history.add(0, record);
@@ -350,5 +546,25 @@ public class ForestrySession
 		{
 			history.remove(history.size() - 1);
 		}
+	}
+
+	private static <K> void putIfPresent(Map<K, Integer> map, K key, Integer value)
+	{
+		if (key != null && value != null)
+		{
+			map.put(key, value);
+		}
+	}
+
+	@Nullable
+	private static Instant toInstant(@Nullable Long millis)
+	{
+		return millis == null ? null : Instant.ofEpochMilli(millis);
+	}
+
+	@Nullable
+	private static Long toMillis(@Nullable Instant instant)
+	{
+		return instant == null ? null : instant.toEpochMilli();
 	}
 }

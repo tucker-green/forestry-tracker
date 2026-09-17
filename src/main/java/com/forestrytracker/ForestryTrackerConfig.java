@@ -108,11 +108,35 @@ public interface ForestryTrackerConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "showLogs",
+		name = "Show logs cut",
+		description = "Show the number of logs cut, and logs per hour, this session",
+		section = overlaySection,
+		position = 4
+	)
+	default boolean showLogs()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "showXp",
+		name = "Show XP/hr",
+		description = "Show Woodcutting experience per hour for this session",
+		section = overlaySection,
+		position = 5
+	)
+	default boolean showXp()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "showLastEventBark",
 		name = "Show last event bark",
 		description = "Show the bark awarded by the current / most recent event",
 		section = overlaySection,
-		position = 4
+		position = 6
 	)
 	default boolean showLastEventBark()
 	{
@@ -124,7 +148,7 @@ public interface ForestryTrackerConfig extends Config
 		name = "Show session bark",
 		description = "Show total bark for this session",
 		section = overlaySection,
-		position = 5
+		position = 7
 	)
 	default boolean showSessionBark()
 	{
@@ -136,7 +160,7 @@ public interface ForestryTrackerConfig extends Config
 		name = "Show lifetime bark",
 		description = "Show bark tracked across all sessions on this character",
 		section = overlaySection,
-		position = 6
+		position = 8
 	)
 	default boolean showLifetimeBark()
 	{
@@ -148,7 +172,7 @@ public interface ForestryTrackerConfig extends Config
 		name = "Show events seen",
 		description = "Show how many Forestry events have been seen this session",
 		section = overlaySection,
-		position = 7
+		position = 9
 	)
 	default boolean showEventsSeen()
 	{
@@ -160,7 +184,7 @@ public interface ForestryTrackerConfig extends Config
 		name = "Show leaves",
 		description = "Show leaves gathered this session",
 		section = overlaySection,
-		position = 8
+		position = 10
 	)
 	default boolean showLeaves()
 	{
@@ -172,7 +196,7 @@ public interface ForestryTrackerConfig extends Config
 		name = "Leaves per type",
 		description = "Break the leaves line down into Leaves / Oak / Willow / Maple / Yew / Magic",
 		section = overlaySection,
-		position = 9
+		position = 11
 	)
 	default boolean leavesBreakdown()
 	{

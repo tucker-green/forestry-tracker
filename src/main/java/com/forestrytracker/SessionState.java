@@ -2,6 +2,7 @@ package com.forestrytracker;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -21,10 +22,15 @@ class SessionState
 	Long lastEventEnd;
 	Long lastBarkAward;
 	int eventsSeen;
+	int logsCut;
+	long xpGained;
+	long pausedMillis;
 	Map<ForestryEvent, Integer> eventCounts = new EnumMap<>(ForestryEvent.class);
 	Map<ForestryEvent, Integer> barkByEvent = new EnumMap<>(ForestryEvent.class);
 	Map<LeafType, Integer> leaves = new EnumMap<>(LeafType.class);
+	Map<String, Integer> logsByType = new LinkedHashMap<>();
 	List<RecordState> history = new ArrayList<>();
+	List<TimeBucket> timeline = new ArrayList<>();
 
 	static class RecordState
 	{
