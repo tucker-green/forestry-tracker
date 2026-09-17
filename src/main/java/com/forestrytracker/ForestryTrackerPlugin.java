@@ -7,6 +7,7 @@ import java.awt.image.BufferedImage;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -102,6 +103,14 @@ public class ForestryTrackerPlugin extends Plugin
 
 	/** Cross-message chat state (Leprechaun's Luck pending flag). */
 	private final ChatState chatState = new ChatState();
+
+	/** Minimum spacing between requests for RuneLite to write the profile to disk. */
+	private static final Duration FLUSH_INTERVAL = Duration.ofSeconds(60);
+	private boolean flushWanted;
+	private Instant lastFlush = Instant.EPOCH;
+
+	@Inject
+	private ScheduledExecutorService executor;
 
 	/** Live NPCs / GameObjects per event; an event is over when its set stays empty for a tick. */
 	private final Map<ForestryEvent, Set<Object>> liveEntities = new EnumMap<>(ForestryEvent.class);
@@ -451,6 +460,17 @@ public class ForestryTrackerPlugin extends Plugin
 		if (dirty)
 		{
 			savePersisted();
+			flushWanted = true;
+		}
+
+		// RuneLite only writes profile config to disk on a clean shutdown and on a ~5 minute timer, so
+		// a crash or force-close would lose everything since then. Ask for a flush (off the client
+		// thread) shortly after changes, at most once per FLUSH_INTERVAL.
+		if (flushWanted && Duration.between(lastFlush, Instant.now()).compareTo(FLUSH_INTERVAL) >= 0)
+		{
+			flushWanted = false;
+			lastFlush = Instant.now();
+			executor.execute(configManager::sendConfig);
 		}
 	}
 
