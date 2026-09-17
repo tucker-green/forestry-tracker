@@ -800,7 +800,7 @@ class ForestryTrackerPanel extends PluginPanel
 		row.setAlignmentX(LEFT_ALIGNMENT);
 		row.add(name, BorderLayout.CENTER);
 
-		Dimension countSize = new Dimension(28, 16);
+		Dimension countSize = new Dimension(38, 16);
 		count.setHorizontalAlignment(SwingConstants.RIGHT);
 		count.setPreferredSize(countSize);
 		count.setMinimumSize(countSize);
