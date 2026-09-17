@@ -100,6 +100,9 @@ public class ForestryTrackerPlugin extends Plugin
 	/** Set on any change since the last {@link #savePersisted()}; flushed at most once per game tick. */
 	private boolean dirty;
 
+	/** Cross-message chat state (Leprechaun's Luck pending flag). */
+	private final ChatState chatState = new ChatState();
+
 	/** Live NPCs / GameObjects per event; an event is over when its set stays empty for a tick. */
 	private final Map<ForestryEvent, Set<Object>> liveEntities = new EnumMap<>(ForestryEvent.class);
 	private final Set<ForestryEvent> pendingEnd = EnumSet.noneOf(ForestryEvent.class);
@@ -212,6 +215,7 @@ public class ForestryTrackerPlugin extends Plugin
 				savePersisted();
 				// The next StatChanged after login is only a baseline, not a gain.
 				lastWcXp = -1;
+				chatState.reset();
 				// fallthrough
 			case LOADING:
 				// Entities are re-spawned after a scene load; if the current event's entities don't come back
@@ -233,7 +237,7 @@ public class ForestryTrackerPlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
-		if (handleChatMessage(event.getType(), event.getMessage(), this::activeSession, liveEntities, lifetime, today()))
+		if (handleChatMessage(event.getType(), event.getMessage(), this::activeSession, liveEntities, lifetime, today(), chatState))
 		{
 			markDirty();
 			refreshPanel();
@@ -251,26 +255,43 @@ public class ForestryTrackerPlugin extends Plugin
 	 * @return true if session or lifetime state changed and the caller should persist/refresh
 	 */
 	static boolean handleChatMessage(ChatMessageType type, String message, Supplier<ForestrySession> sessionSupplier,
-		Map<ForestryEvent, Set<Object>> liveEntities, LifetimeStats lifetime, String today)
+		Map<ForestryEvent, Set<Object>> liveEntities, LifetimeStats lifetime, String today, ChatState state)
 	{
 		if (type != ChatMessageType.SPAM && type != ChatMessageType.GAMEMESSAGE && type != ChatMessageType.MESBOX)
 		{
 			return false;
 		}
 
+		if (ChatParser.isLeprechaunLuck(message))
+		{
+			// The award line follows immediately; remember that it belongs to the Leprechaun.
+			state.leprechaunLuckPending = true;
+			return false;
+		}
+
 		int barkAmount = ChatParser.parseBark(message);
 		if (barkAmount >= 0)
 		{
+			boolean luck = state.leprechaunLuckPending;
+			state.leprechaunLuckPending = false;
+
 			ForestrySession s = sessionSupplier.get();
 			if (s.getCurrentEvent() == null)
 			{
-				// The player may have stopped participating (rule 1 below) but the event's entities
-				// (and thus the event itself, from the player's point of view) are still around;
-				// reopen it so this bark attaches to it instead of creating an "Unknown event" or
-				// relying on the 10-second grace window.
 				ForestryEvent lastEvent = s.getLastEvent();
-				if (lastEvent != null && !liveEntities.get(lastEvent).isEmpty() && s.isLastRecord(lastEvent))
+				if (luck && s.isLastRecord(ForestryEvent.LEPRECHAUN))
 				{
+					// Leprechaun's Luck pays out on log cuts, usually after the leprechaun is gone:
+					// attach it to the leprechaun's record regardless of live entities.
+					s.resumeLastEvent();
+					log.debug("Forestry event resumed: LEPRECHAUN (leprechaun's luck)");
+				}
+				else if (lastEvent != null && !liveEntities.get(lastEvent).isEmpty() && s.isLastRecord(lastEvent))
+				{
+					// The player may have stopped participating (rule 1 below) but the event's entities
+					// (and thus the event itself, from the player's point of view) are still around;
+					// reopen it so this bark attaches to it instead of creating an "Unknown event" or
+					// relying on the 10-second grace window.
 					s.resumeLastEvent();
 					log.debug("Forestry event resumed: {}", lastEvent);
 				}
@@ -278,6 +299,14 @@ public class ForestryTrackerPlugin extends Plugin
 			s.addBark(barkAmount);
 			lifetime.addBark(barkAmount, s.getCurrentEvent() != null ? s.getCurrentEvent() : s.getLastEvent(), today);
 			log.debug("Bark awarded: {} (event {}, session total {})", barkAmount, s.getLastEvent(), s.getTotalBark());
+
+			if (s.getCurrentEvent() == ForestryEvent.LEPRECHAUN && liveEntities.get(ForestryEvent.LEPRECHAUN).isEmpty())
+			{
+				// The leprechaun itself has left; close the record again so the luck payout doesn't keep
+				// the event "in progress" until the next event starts.
+				s.endEvent();
+				log.debug("Forestry event ended: LEPRECHAUN (luck payout after despawn)");
+			}
 			return true;
 		}
 
@@ -300,12 +329,13 @@ public class ForestryTrackerPlugin extends Plugin
 		{
 			ForestrySession s = sessionSupplier.get();
 			ForestryEvent current = s.getCurrentEvent();
-			if (current != null && s.getCurrentEventBark() > 0)
+			if (current != null && current != ForestryEvent.LEPRECHAUN && s.getCurrentEventBark() > 0)
 			{
 				// The player went back to chopping after collecting bark from this event: end their
 				// participation now rather than waiting for the (possibly much later) despawn of its
-				// entities. Events with no bark yet (e.g. a Leprechaun, or one the player never
-				// engaged with) are left running.
+				// entities. Events with no bark yet (or one the player never engaged with) are left
+				// running, and so is the Leprechaun: its bark (Leprechaun's Luck) is earned BY chopping,
+				// so a log cut is participation rather than the end of it.
 				s.endEvent();
 				log.debug("Forestry event ended: {} (player resumed chopping)", current);
 			}

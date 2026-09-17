@@ -47,9 +47,74 @@ public class ForestryTrackerPluginChatTest
 		}
 	}
 
+	private final ChatState chatState = new ChatState();
+
 	private boolean handle(ChatMessageType type, String message)
 	{
-		return ForestryTrackerPlugin.handleChatMessage(type, message, () -> session, liveEntities, lifetime, DAY);
+		return ForestryTrackerPlugin.handleChatMessage(type, message, () -> session, liveEntities, lifetime, DAY, chatState);
+	}
+
+	// --- Leprechaun's Luck (real captured messages) --------------------------------------------------------------
+
+	@Test
+	public void leprechaunIsNotEndedByChoppingAndLuckBarkAccumulates()
+	{
+		Object leprechaun = new Object();
+		liveEntities.get(ForestryEvent.LEPRECHAUN).add(leprechaun);
+		session.startEvent(ForestryEvent.LEPRECHAUN);
+
+		assertFalse(handle(ChatMessageType.GAMEMESSAGE, "You feel more in touch with the trees after standing in the rainbow."));
+		assertFalse(handle(ChatMessageType.SPAM, "You use your leprechaun's luck to gather some Anima-infused bark."));
+		assertTrue(handle(ChatMessageType.SPAM, "You've been awarded @mes_hl_blu@22 Anima-infused bark</col>."));
+		assertTrue(handle(ChatMessageType.SPAM, "You get some willow logs."));
+		assertFalse(handle(ChatMessageType.SPAM, "You use your leprechaun's luck to gather some Anima-infused bark."));
+		assertTrue(handle(ChatMessageType.SPAM, "You've been awarded @mes_hl_blu@23 Anima-infused bark</col>."));
+
+		// Still the same, open event: chopping is how leprechaun bark is earned.
+		assertEquals(ForestryEvent.LEPRECHAUN, session.getCurrentEvent());
+		assertEquals(45, session.getCurrentEventBark());
+		assertEquals(1, session.getEventsSeen());
+		assertTrue(session.getHistory().isEmpty());
+		assertEquals(45, lifetime.getBarkForEvent(ForestryEvent.LEPRECHAUN));
+	}
+
+	@Test
+	public void luckBarkAfterLeprechaunLeftGoesToItsRecordAndClosesAgain()
+	{
+		session.startEvent(ForestryEvent.LEPRECHAUN);
+		session.addBark(22);
+		session.endEvent(); // leprechaun despawned; no live entities remain
+		now = now.plusSeconds(60); // well past the 10-second grace
+
+		assertFalse(handle(ChatMessageType.GAMEMESSAGE, "You use the last of your leprechaun's luck to gather some Anima-infused bark."));
+		assertTrue(handle(ChatMessageType.SPAM, "You've been awarded @mes_hl_blu@23 Anima-infused bark</col>."));
+
+		assertNull(session.getCurrentEvent());
+		assertEquals(1, session.getHistory().size());
+		assertEquals(ForestryEvent.LEPRECHAUN, session.getHistory().get(0).getEvent());
+		assertEquals(45, session.getHistory().get(0).getBark());
+		assertEquals(45, session.getLastEventBark());
+		assertEquals(1, session.getEventsSeen());
+	}
+
+	@Test
+	public void luckFlagIsConsumedByTheNextAwardOnly()
+	{
+		session.startEvent(ForestryEvent.LEPRECHAUN);
+		session.endEvent();
+		now = now.plusSeconds(60);
+
+		assertFalse(handle(ChatMessageType.SPAM, "You use your leprechaun's luck to gather some Anima-infused bark."));
+		assertTrue(handle(ChatMessageType.SPAM, "You've been awarded @mes_hl_blu@10 Anima-infused bark</col>."));
+		// A later award (past the grace window) with no luck line and no live event is standalone.
+		now = now.plusSeconds(60);
+		assertTrue(handle(ChatMessageType.SPAM, "You've been awarded @mes_hl_blu@5 Anima-infused bark</col>."));
+
+		assertEquals(2, session.getHistory().size());
+		assertNull(session.getHistory().get(0).getEvent());
+		assertEquals(5, session.getHistory().get(0).getBark());
+		assertEquals(ForestryEvent.LEPRECHAUN, session.getHistory().get(1).getEvent());
+		assertEquals(10, session.getHistory().get(1).getBark());
 	}
 
 	// --- real captured messages, end-to-end through the plugin glue (not just ChatParser in isolation) ----------

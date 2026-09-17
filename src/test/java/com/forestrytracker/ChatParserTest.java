@@ -2,7 +2,9 @@ package com.forestrytracker;
 
 import org.junit.Test;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 public class ChatParserTest
 {
@@ -196,5 +198,17 @@ public class ChatParserTest
 		assertEquals(-1, ChatParser.parseBark(msg));
 		assertNull(ChatParser.parseLeaves(msg));
 		assertNull(ChatParser.parseLog(msg));
+	}
+
+	@Test
+	public void leprechaunLuckLinesAreRecognised()
+	{
+		assertTrue(ChatParser.isLeprechaunLuck("You use your leprechaun's luck to gather some Anima-infused bark."));
+		assertTrue(ChatParser.isLeprechaunLuck("You use the last of your leprechaun's luck to gather some Anima-infused bark."));
+		assertTrue(ChatParser.isLeprechaunLuck("You use your leprechaun’s luck to gather some Anima-infused bark."));
+		assertFalse(ChatParser.isLeprechaunLuck("You feel more in touch with the trees after standing in the rainbow."));
+		assertFalse(ChatParser.isLeprechaunLuck("You've been awarded @mes_hl_blu@22 Anima-infused bark</col>."));
+		// The luck line itself is not a bark award.
+		assertEquals(-1, ChatParser.parseBark("You use your leprechaun's luck to gather some Anima-infused bark."));
 	}
 }

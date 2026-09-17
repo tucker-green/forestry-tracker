@@ -34,6 +34,15 @@ final class ChatParser
 		"You get (?:some|an) ([\\w ]*?(?:logs?|mushrooms))\\.?",
 		Pattern.CASE_INSENSITIVE);
 
+	/**
+	 * Leprechaun's Luck: after standing in the rainbow, the next several log cuts each pay bark. This
+	 * line precedes the normal "You've been awarded ..." award and is the only way to tell that bark
+	 * apart from other awards, since it arrives while chopping and often after the leprechaun has left.
+	 */
+	private static final Pattern LEPRECHAUN_LUCK_PATTERN = Pattern.compile(
+		"You use (?:the last of )?your leprechaun(?:'|’)s luck to gather some Anima-infused bark\\.?",
+		Pattern.CASE_INSENSITIVE);
+
 	/** Strips HTML-ish colour tags (e.g. {@code <col=0000ff>}, {@code </col>}) from a chat message. */
 	private static final Pattern TAG_PATTERN = Pattern.compile("<[^>]*>");
 
@@ -69,6 +78,12 @@ final class ChatParser
 		}
 		String amount = m.group(1) != null ? m.group(1) : m.group(2);
 		return Integer.parseInt(amount);
+	}
+
+	/** True for the "You use your leprechaun's luck to gather some Anima-infused bark." line. */
+	static boolean isLeprechaunLuck(String msg)
+	{
+		return LEPRECHAUN_LUCK_PATTERN.matcher(stripFormatting(msg)).find();
 	}
 
 	/**
