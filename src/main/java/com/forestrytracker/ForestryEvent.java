@@ -48,7 +48,8 @@ public enum ForestryEvent
 			case NpcID.GATHERING_EVENT_FLOWERING_TREE_BUSH_FRUITED_COL06:
 			case NpcID.GATHERING_EVENT_FLOWERING_TREE_BUSH_FRUITED_COL07:
 			case NpcID.GATHERING_EVENT_FLOWERING_TREE_BUSH_FRUITED_COL08:
-			case NpcID.GATHERING_EVENT_FLOWERING_TREE_BEES:
+				// Note: GATHERING_EVENT_FLOWERING_TREE_BEES is deliberately NOT mapped. Despite its name the
+				// bees NPC also appears during the Bee Hive event, so it would misidentify that event.
 				return FLOWERING_TREE;
 
 			case NpcID.GATHERING_EVENT_WOODCUTTING_LEPRECHAUN:
