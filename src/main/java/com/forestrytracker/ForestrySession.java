@@ -80,6 +80,113 @@ public class ForestrySession
 		this.lastActivity = start;
 	}
 
+	ForestrySession(SessionState state)
+	{
+		this(state, Instant::now);
+	}
+
+	/** Restores a session from a persisted snapshot. Any event that was in progress is treated as ended. */
+	ForestrySession(SessionState state, Supplier<Instant> clock)
+	{
+		this.clock = clock;
+		this.start = Instant.ofEpochMilli(state.start);
+		this.lastActivity = Instant.ofEpochMilli(state.lastActivity);
+		this.active = state.active;
+		this.totalBark = state.totalBark;
+		this.lastEventBark = state.lastEventBark;
+		this.lastEvent = state.lastEvent;
+		this.lastEventStart = toInstant(state.lastEventStart);
+		this.lastEventEnd = toInstant(state.lastEventEnd);
+		this.lastBarkAward = toInstant(state.lastBarkAward);
+		this.eventsSeen = state.eventsSeen;
+		if (state.eventCounts != null)
+		{
+			state.eventCounts.forEach((k, v) -> putIfPresent(eventCounts, k, v));
+		}
+		if (state.barkByEvent != null)
+		{
+			state.barkByEvent.forEach((k, v) -> putIfPresent(barkByEvent, k, v));
+		}
+		if (state.leaves != null)
+		{
+			state.leaves.forEach((k, v) -> putIfPresent(leaves, k, v));
+		}
+		if (state.history != null)
+		{
+			for (SessionState.RecordState r : state.history)
+			{
+				if (r == null)
+				{
+					continue;
+				}
+				history.add(new EventRecord(r.event, Instant.ofEpochMilli(r.start), toInstant(r.end), r.bark));
+				if (history.size() >= MAX_HISTORY)
+				{
+					break;
+				}
+			}
+		}
+	}
+
+	/** Snapshot for persistence. An event in progress is recorded as if it had just ended. */
+	SessionState toState()
+	{
+		SessionState state = new SessionState();
+		state.start = start.toEpochMilli();
+		state.lastActivity = lastActivity.toEpochMilli();
+		state.active = active;
+		state.totalBark = totalBark;
+		state.lastEventBark = currentEvent != null ? currentEventBark : lastEventBark;
+		state.lastEvent = lastEvent;
+		state.lastEventStart = toMillis(lastEventStart);
+		state.lastEventEnd = toMillis(lastEventEnd);
+		state.lastBarkAward = toMillis(lastBarkAward);
+		state.eventsSeen = eventsSeen;
+		state.eventCounts.putAll(eventCounts);
+		state.barkByEvent.putAll(barkByEvent);
+		state.leaves.putAll(leaves);
+
+		if (currentEvent != null)
+		{
+			SessionState.RecordState r = new SessionState.RecordState();
+			r.event = currentEvent;
+			r.start = currentEventStart.toEpochMilli();
+			r.end = clock.get().toEpochMilli();
+			r.bark = currentEventBark;
+			state.history.add(r);
+		}
+		for (EventRecord record : history)
+		{
+			SessionState.RecordState r = new SessionState.RecordState();
+			r.event = record.getEvent();
+			r.start = record.getStart().toEpochMilli();
+			r.end = toMillis(record.getEnd());
+			r.bark = record.getBark();
+			state.history.add(r);
+		}
+		return state;
+	}
+
+	private static <K> void putIfPresent(Map<K, Integer> map, K key, Integer value)
+	{
+		if (key != null && value != null)
+		{
+			map.put(key, value);
+		}
+	}
+
+	@Nullable
+	private static Instant toInstant(@Nullable Long millis)
+	{
+		return millis == null ? null : Instant.ofEpochMilli(millis);
+	}
+
+	@Nullable
+	private static Long toMillis(@Nullable Instant instant)
+	{
+		return instant == null ? null : instant.toEpochMilli();
+	}
+
 	/** Marks the session as active right now. */
 	public void touch()
 	{

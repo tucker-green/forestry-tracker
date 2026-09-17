@@ -43,6 +43,13 @@ class ForestryTrackerPanel extends PluginPanel
 	private final Map<ForestryEvent, JLabel> eventBarkLabels = new EnumMap<>(ForestryEvent.class);
 	private final Map<LeafType, JLabel> leafLabels = new EnumMap<>(LeafType.class);
 
+	private final JLabel lifeBarkValue = valueLabel();
+	private final JLabel lifeEventsValue = valueLabel();
+	private final JLabel lifeLeavesValue = valueLabel();
+	private final Map<ForestryEvent, JLabel> lifeEventCountLabels = new EnumMap<>(ForestryEvent.class);
+	private final Map<ForestryEvent, JLabel> lifeEventBarkLabels = new EnumMap<>(ForestryEvent.class);
+	private final Map<LeafType, JLabel> lifeLeafLabels = new EnumMap<>(LeafType.class);
+
 	private final JPanel historyList = new JPanel();
 	private final JLabel historyEmpty = new JLabel("No events yet");
 
@@ -115,14 +122,58 @@ class ForestryTrackerPanel extends PluginPanel
 		historyList.add(historyEmpty);
 		history.add(historyList);
 		add(history);
+		add(Box.createVerticalStrut(10));
+
+		JPanel lifetime = section("Lifetime (this character)");
+		lifetime.add(row("Bark", lifeBarkValue));
+		lifetime.add(row("Events seen", lifeEventsValue));
+		lifetime.add(row("Leaves", lifeLeavesValue));
+		for (LeafType type : LeafType.values())
+		{
+			JLabel value = valueLabel();
+			lifeLeafLabels.put(type, value);
+			lifetime.add(row("  " + type.getDisplayName(), value));
+		}
+		for (ForestryEvent event : ForestryEvent.values())
+		{
+			JLabel count = valueLabel();
+			JLabel bark = valueLabel();
+			lifeEventCountLabels.put(event, count);
+			lifeEventBarkLabels.put(event, bark);
+
+			JPanel values = new JPanel(new GridLayout(1, 2, 4, 0));
+			values.setOpaque(false);
+			values.add(count);
+			values.add(bark);
+			lifetime.add(row(event.getDisplayName(), values));
+		}
+		add(lifetime);
 
 		refresh();
+	}
+
+	private void refreshLifetime()
+	{
+		LifetimeStats life = plugin.getLifetime();
+		lifeBarkValue.setText(Integer.toString(life.getBark()));
+		lifeEventsValue.setText(Integer.toString(life.getEventsSeen()));
+		lifeLeavesValue.setText(Integer.toString(life.getTotalLeaves()));
+		for (Map.Entry<LeafType, JLabel> e : lifeLeafLabels.entrySet())
+		{
+			e.getValue().setText(Integer.toString(life.getLeaves(e.getKey())));
+		}
+		for (ForestryEvent e : ForestryEvent.values())
+		{
+			lifeEventCountLabels.get(e).setText(Integer.toString(life.getEventCount(e)));
+			lifeEventBarkLabels.get(e).setText(Integer.toString(life.getBarkForEvent(e)));
+		}
 	}
 
 	void refresh()
 	{
 		ForestrySession session = plugin.getSession();
 		lifetimeBarkValue.setText(Integer.toString(plugin.getLifetimeBark()));
+		refreshLifetime();
 
 		if (session == null)
 		{

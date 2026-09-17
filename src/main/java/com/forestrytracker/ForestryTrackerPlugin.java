@@ -1,11 +1,14 @@
 package com.forestrytracker;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 import com.google.inject.Provides;
 import java.awt.image.BufferedImage;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -33,6 +36,7 @@ import net.runelite.api.gameval.InventoryID;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.events.RuneScapeProfileChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
@@ -48,10 +52,21 @@ import net.runelite.client.util.ImageUtil;
 )
 public class ForestryTrackerPlugin extends Plugin
 {
-	/** Same message the core Woodcutting plugin parses. */
-	private static final Pattern ANIMA_BARK_PATTERN = Pattern.compile("You've been awarded <col=[0-9a-f]+>(\\d+) Anima-infused bark</col>\\.");
+	/**
+	 * Bark award message. The core Woodcutting plugin matches
+	 * "You've been awarded <col=..>N Anima-infused bark</col>."; this is slightly looser about the colour tags.
+	 */
+	private static final Pattern ANIMA_BARK_PATTERN = Pattern.compile(
+		"You(?:'ve| have) been awarded (?:<col=[0-9a-f]+>)?(\\d+) Anima-infused bark(?:</col>)?\\.?",
+		Pattern.CASE_INSENSITIVE);
 
 	private static final int PANEL_REFRESH_MS = 1000;
+
+	/** Profile-config keys (per RuneScape character). */
+	private static final String SESSION_KEY = "session";
+	private static final String LIFETIME_KEY = "lifetime";
+	/** Key used by 1.0.0 before per-event lifetime stats existed; migrated on load. */
+	private static final String LEGACY_LIFETIME_BARK_KEY = "lifetimeBark";
 
 	@Inject
 	private Client client;
@@ -71,11 +86,14 @@ public class ForestryTrackerPlugin extends Plugin
 	@Inject
 	private ClientToolbar clientToolbar;
 
+	@Inject
+	private Gson gson;
+
 	@Getter
 	private ForestrySession session;
 
 	@Getter
-	private int lifetimeBark;
+	private LifetimeStats lifetime = new LifetimeStats();
 
 	private ForestryTrackerPanel panel;
 	private NavigationButton navButton;
@@ -86,7 +104,7 @@ public class ForestryTrackerPlugin extends Plugin
 	private final Set<ForestryEvent> pendingEnd = EnumSet.noneOf(ForestryEvent.class);
 
 	/** Last known leaf counts per tracked container (inventory, forestry kit). */
-	private final Map<Integer, Map<LeafType, Integer>> leafSnapshots = new java.util.HashMap<>();
+	private final Map<Integer, Map<LeafType, Integer>> leafSnapshots = new HashMap<>();
 	private final Map<LeafType, Integer> pendingLeaves = new EnumMap<>(LeafType.class);
 	private boolean bankChangedThisTick;
 
@@ -115,13 +133,15 @@ public class ForestryTrackerPlugin extends Plugin
 
 		if (client.getGameState() == GameState.LOGGED_IN)
 		{
-			loadLifetimeBark();
+			loadPersisted();
 		}
 	}
 
 	@Override
 	protected void shutDown()
 	{
+		savePersisted();
+
 		overlayManager.remove(overlay);
 		if (panelTimer != null)
 		{
@@ -133,6 +153,7 @@ public class ForestryTrackerPlugin extends Plugin
 		panel = null;
 
 		session = null;
+		lifetime = new LifetimeStats();
 		clearLiveEntities();
 		leafSnapshots.clear();
 		pendingLeaves.clear();
@@ -144,10 +165,16 @@ public class ForestryTrackerPlugin extends Plugin
 		return configManager.getConfig(ForestryTrackerConfig.class);
 	}
 
+	public int getLifetimeBark()
+	{
+		return lifetime.getBark();
+	}
+
 	public void resetSession()
 	{
 		session = null;
 		clearLiveEntities();
+		savePersisted();
 		refreshPanel();
 	}
 
@@ -160,11 +187,18 @@ public class ForestryTrackerPlugin extends Plugin
 		}
 		if (ForestryTrackerConfig.RESET_LIFETIME_KEY.equals(event.getKey()) && config.resetLifetimeBark())
 		{
-			lifetimeBark = 0;
-			saveLifetimeBark();
+			lifetime = new LifetimeStats();
+			savePersisted();
 			configManager.setConfiguration(ForestryTrackerConfig.GROUP, ForestryTrackerConfig.RESET_LIFETIME_KEY, false);
 			refreshPanel();
 		}
+	}
+
+	@Subscribe
+	public void onRuneScapeProfileChanged(RuneScapeProfileChanged event)
+	{
+		// Fired once the logged-in character is known; this is when per-character config becomes readable.
+		loadPersisted();
 	}
 
 	@Subscribe
@@ -172,11 +206,9 @@ public class ForestryTrackerPlugin extends Plugin
 	{
 		switch (event.getGameState())
 		{
-			case LOGGED_IN:
-				loadLifetimeBark();
-				break;
 			case LOGIN_SCREEN:
 			case HOPPING:
+				savePersisted();
 				// Another character may log in next: forget container contents so we don't count their leaves.
 				leafSnapshots.clear();
 				pendingLeaves.clear();
@@ -209,15 +241,17 @@ public class ForestryTrackerPlugin extends Plugin
 		}
 
 		Matcher matcher = ANIMA_BARK_PATTERN.matcher(event.getMessage());
-		if (!matcher.matches())
+		if (!matcher.find())
 		{
 			return;
 		}
 
 		int amount = Integer.parseInt(matcher.group(1));
-		activeSession().addBark(amount);
-		lifetimeBark += amount;
-		saveLifetimeBark();
+		ForestrySession s = activeSession();
+		s.addBark(amount);
+		lifetime.addBark(amount, s.getCurrentEvent() != null ? s.getCurrentEvent() : s.getLastEvent());
+		log.debug("Bark awarded: {} (event {}, session total {})", amount, s.getLastEvent(), s.getTotalBark());
+		savePersisted();
 		refreshPanel();
 	}
 
@@ -309,14 +343,22 @@ public class ForestryTrackerPlugin extends Plugin
 		{
 			if (!bankChangedThisTick)
 			{
+				boolean gained = false;
 				for (Map.Entry<LeafType, Integer> e : pendingLeaves.entrySet())
 				{
 					if (e.getValue() > 0)
 					{
 						activeSession().addLeaves(e.getKey(), e.getValue());
+						lifetime.addLeaves(e.getKey(), e.getValue());
+						gained = true;
 					}
 				}
-				refreshPanel();
+				if (gained)
+				{
+					log.debug("Leaves gained: {}", pendingLeaves);
+					savePersisted();
+					refreshPanel();
+				}
 			}
 			pendingLeaves.clear();
 		}
@@ -331,6 +373,7 @@ public class ForestryTrackerPlugin extends Plugin
 				{
 					session.endEvent();
 					log.debug("Forestry event ended: {}", event);
+					savePersisted();
 					refreshPanel();
 				}
 			}
@@ -344,6 +387,7 @@ public class ForestryTrackerPlugin extends Plugin
 			if (session.getCurrentEvent() == null && session.getTimeSinceActivity().compareTo(timeout) >= 0)
 			{
 				session.setActive(false);
+				savePersisted();
 				refreshPanel();
 			}
 		}
@@ -359,7 +403,9 @@ public class ForestryTrackerPlugin extends Plugin
 		if (s.getCurrentEvent() != event)
 		{
 			s.startEvent(event);
+			lifetime.addEvent(event);
 			log.debug("Forestry event started: {}", event);
+			savePersisted();
 			refreshPanel();
 		}
 	}
@@ -398,16 +444,86 @@ public class ForestryTrackerPlugin extends Plugin
 		pendingEnd.clear();
 	}
 
-	private void loadLifetimeBark()
+	// --- persistence -------------------------------------------------------------------------------------------
+
+	private boolean hasProfile()
 	{
-		Integer stored = configManager.getRSProfileConfiguration(ForestryTrackerConfig.GROUP, ForestryTrackerConfig.LIFETIME_BARK_KEY, Integer.class);
-		lifetimeBark = stored == null ? 0 : stored;
+		return configManager.getRSProfileKey() != null;
+	}
+
+	private void loadPersisted()
+	{
+		if (!hasProfile())
+		{
+			return;
+		}
+
+		LifetimeStats loaded = null;
+		String lifetimeJson = configManager.getRSProfileConfiguration(ForestryTrackerConfig.GROUP, LIFETIME_KEY);
+		if (lifetimeJson != null)
+		{
+			try
+			{
+				loaded = gson.fromJson(lifetimeJson, LifetimeStats.class);
+			}
+			catch (JsonSyntaxException e)
+			{
+				log.warn("Discarding unreadable lifetime stats", e);
+			}
+		}
+		if (loaded == null)
+		{
+			loaded = new LifetimeStats();
+			// Migrate the 1.0.0 bark-only total.
+			Integer legacy = configManager.getRSProfileConfiguration(ForestryTrackerConfig.GROUP, LEGACY_LIFETIME_BARK_KEY, Integer.class);
+			if (legacy != null && legacy > 0)
+			{
+				loaded.addBark(legacy, null);
+				configManager.unsetRSProfileConfiguration(ForestryTrackerConfig.GROUP, LEGACY_LIFETIME_BARK_KEY);
+			}
+		}
+		lifetime = loaded.normalize();
+
+		ForestrySession restored = null;
+		String sessionJson = configManager.getRSProfileConfiguration(ForestryTrackerConfig.GROUP, SESSION_KEY);
+		if (sessionJson != null)
+		{
+			try
+			{
+				SessionState state = gson.fromJson(sessionJson, SessionState.class);
+				if (state != null)
+				{
+					restored = new ForestrySession(state);
+				}
+			}
+			catch (RuntimeException e)
+			{
+				log.warn("Discarding unreadable session", e);
+			}
+		}
+		session = restored;
+		clearLiveEntities();
+
+		log.debug("Loaded forestry stats: lifetime bark {}, session {}", lifetime.getBark(),
+			session == null ? "none" : session.getTotalBark() + " bark");
 		refreshPanel();
 	}
 
-	private void saveLifetimeBark()
+	private void savePersisted()
 	{
-		configManager.setRSProfileConfiguration(ForestryTrackerConfig.GROUP, ForestryTrackerConfig.LIFETIME_BARK_KEY, lifetimeBark);
+		if (!hasProfile())
+		{
+			return;
+		}
+		configManager.setRSProfileConfiguration(ForestryTrackerConfig.GROUP, LIFETIME_KEY, gson.toJson(lifetime));
+		if (session == null)
+		{
+			configManager.unsetRSProfileConfiguration(ForestryTrackerConfig.GROUP, SESSION_KEY);
+		}
+		else
+		{
+			configManager.setRSProfileConfiguration(ForestryTrackerConfig.GROUP, SESSION_KEY, gson.toJson(session.toState()));
+		}
 	}
 
 	private void refreshPanel()

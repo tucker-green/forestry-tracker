@@ -9,12 +9,17 @@ A RuneLite plugin that tracks Old School RuneScape Forestry events while you woo
 - Current / last event name, and time since the last event started
 - Anima-infused bark from the last event
 - Bark per hour for the session
-- Session bark and lifetime bark (lifetime is saved per character)
+- Session bark and lifetime bark
 - Events seen this session
 - Leaves gathered this session, optionally broken down by type
 
 **Side panel** (tree icon in the sidebar): the same stats, a per-event table with counts and bark,
-a history of completed events, and a "Reset session" button.
+a history of completed events, a "Reset session" button, and a lifetime section with running totals
+for bark, leaves and events per type.
+
+Everything is saved per character in your RuneLite profile. The current session survives closing the
+client (it resumes where it left off, or times out as usual), and lifetime totals only reset via the
+"Reset lifetime bark" toggle in the plugin settings.
 
 Every overlay line can be toggled in the plugin settings. The session goes idle after a
 configurable number of minutes without an event or bark; the next event starts a fresh session
